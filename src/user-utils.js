@@ -16,3 +16,10 @@ export function deepMerge(target, source) {
   }
   return out;
 }
+
+export function retry(fn, times) {
+  return fn().catch(function (err) {
+    if (times > 0) return retry(fn, times - 1);
+    throw err;
+  });
+}
