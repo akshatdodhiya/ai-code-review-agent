@@ -1,0 +1,3 @@
+Internal sandbox notes.
+
+This file is a low-signal change used to exercise the triage gate.
