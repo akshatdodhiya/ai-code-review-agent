@@ -77,10 +77,10 @@ All four are first-party Workers AI models billed in Neurons. A full committee r
 
 | PR | Change | Path | Result |
 |---|---|---|---|
-| [#1](https://github.com/akshatdodhiya/code-reviewer-test/pull/1) | Fixtures with inert, publicly documented example credentials | Secret gate | Critical block naming the credential types; committee never invoked (~16 s) |
-| [#2](https://github.com/akshatdodhiya/code-reviewer-test/pull/2) | Known-vulnerable dependency pins | Full committee, forced by live CVEs | Synthesized review posted; predates the Clef migration, so the comment carries the visible fallback notice from when the original paid triage model was unavailable (~36 s) |
-| [#3](https://github.com/akshatdodhiya/code-reviewer-test/pull/3) | Vulnerable deps plus utility code with real defects | Full committee | Complete review — security, policy, dependency, supply-chain and quality findings, numbered fixes, corrected example code (~53 s) |
-| [#4](https://github.com/akshatdodhiya/code-reviewer-test/pull/4) | Notes-only file | Triage gate | Classified documentation (0.02 / 0.09 confidence); specialists skipped (~16 s) |
+| [#1](https://github.com/akshatdodhiya/ai-code-review-agent/pull/1) | Fixtures with inert, publicly documented example credentials | Secret gate | Critical block naming the credential types; committee never invoked (~16 s) |
+| [#2](https://github.com/akshatdodhiya/ai-code-review-agent/pull/2) | Known-vulnerable dependency pins | Full committee, forced by live CVEs | Synthesized review posted; predates the Clef migration, so the comment carries the visible fallback notice from when the original paid triage model was unavailable (~36 s) |
+| [#3](https://github.com/akshatdodhiya/ai-code-review-agent/pull/3) | Vulnerable deps plus utility code with real defects | Full committee | Complete review — security, policy, dependency, supply-chain and quality findings, numbered fixes, corrected example code (~53 s) |
+| [#4](https://github.com/akshatdodhiya/ai-code-review-agent/pull/4) | Notes-only file | Triage gate | Classified documentation (0.02 / 0.09 confidence); specialists skipped (~16 s) |
 
 The credential strings in PR #1 are published example values and were never valid.
 
