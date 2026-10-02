@@ -8,10 +8,11 @@
 
 **Worker (visit it live)** — `https://cloudflare-code-reviewer.akshat-personal.workers.dev`
 **Bot identity** — `cf-pr-review[bot]`, a real GitHub App (ID 5156105) with least-privilege permissions
+**Built during** — ClawBuilders S1:E5: [Deploy AI Agents with Cloudflare](https://clawbuilder.club/events/s1/ep5/deploy-ai-agents-with-cloudflare)
 
 ---
 
-## 🎬 The 30-second pitch (read this aloud)
+## 🎬 The 30-second pitch
 
 Someone opens a PR. GitHub fires a **signed webhook** into a **Cloudflare Worker** — no server, no VM, no cron, no polling. A **Durable Object** — a tiny stateful actor, one per PR — debounces pushes for 15 seconds. Then the diff runs through a **7-pillar security pipeline**: hardcoded-secret scanning, live CVE lookups, supply-chain scoring, policy gates. A **triage model** decides whether the expensive AI specialists are needed at all. If yes: a **DeepSeek-R1 security auditor** and a **Qwen 2.5 Coder quality reviewer** analyze in parallel, then a **Llama 3.3 70B arbiter** deduplicates, runs a regression checklist, and formats the verdict. The bot posts the review back on the PR, and every review is written to a SQLite audit trail inside the Durable Object.
 
@@ -91,6 +92,22 @@ flowchart TD
 | [#2](https://github.com/akshatdodhiya/code-reviewer-test/pull/2) | `lodash@4.17.15` + `request@2.88.0`, no secrets | Full committee (forced by real CVEs) | osv.dev found real advisories → **forced** the security specialist on → committee posted the synthesis. This run also caught a **visible degradation**: the paid triage model was unavailable, the posted comment *said so*, and the free-tier fallback kept the pipeline alive — proof that degraded runs are never silent. | **36s** |
 | [#3](https://github.com/akshatdodhiya/code-reviewer-test/pull/3) | Vulnerable deps + a utilities file with real bugs | Full committee, post-swap — **$0 all the way down** | Complete review with every badge section — [SECURITY] (NPE in `formatUser`, unsafe fetch, retry without backoff), [POLICY] (`var` usage), [DEPENDENCY] (6 lodash advisories, 1 request), [SUPPLY-CHAIN] (low OpenSSF checks), [CODE QUALITY] (`for...in` without `hasOwnProperty`) — plus a numbered fixes list and corrected example code. | **53s** |
 
+*(Every credential value in #1 is a publicly documented example string with zero validity.)*
+
+## 🧪 Try it yourself
+
+This repo is the bot's live playground — open any pull request and a review lands in under a minute:
+
+- Add a file containing a **fake** API key (use publicly documented example strings only — never real credentials) → Pillar 1 blocks it instantly
+- Add a `package.json` dependency with known CVEs → live osv.dev findings force a security review
+- Open a docs-only PR → the triage gate skips the expensive committee and says so in a short comment
+
+Fair-play notes for visitors: reviews run on Workers AI's free daily Neuron allowance — if today's budget is spent, the bot goes quiet until 00:00 UTC. Please keep test PRs reasonable so everyone gets a turn.
+
+## 🧷 About the code in the test branches
+
+The branches in this repo contain **deliberate test fixtures**: fake credentials (publicly documented example strings with zero validity — see PR #1) and known-vulnerable dependency pins (see PR #2 / #3). They exist to trip specific pipeline pillars so every review path could be verified end-to-end. None of it is production code, nothing executes, and the "secrets" are inert examples.
+
 ## 🎤 Talking points
 
 - **It's event-driven serverless.** Nothing runs until a PR happens. No idle servers, no cron polling GitHub, no queue infrastructure.
@@ -98,7 +115,7 @@ flowchart TD
 - **Deterministic before probabilistic.** The regex/CVE/policy gates run *before* any model call — a hardcoded AWS key never depends on an LLM noticing it.
 - **Triage can only add scrutiny, never remove it.** If osv.dev or the policy gate found something real, the security specialist runs no matter what the triage model says.
 - **Degradation is visible, never silent.** If a tier fails, the pipeline fails *open* (runs the full committee) and the posted comment says exactly which tier was unavailable.
-- **This sandbox is a private repo — and the bot handles it fine.** The diff is fetched via the authenticated REST API with the App installation token (the `.diff` web route 404s for App tokens on private repos — a real deployment gotcha that was debugged and fixed here).
+- **Private repos are handled fine** — this repo *was* private for the entire build, and the bot reviewed every PR. The diff is fetched via the authenticated REST API with the App installation token (the `.diff` web route 404s for App tokens on private repos — a real deployment gotcha that was debugged and fixed here).
 
 ## 💸 What it costs
 
@@ -129,7 +146,7 @@ flowchart TD
 
 **"What if a model call fails?"** — Triage fails *open* — the full committee runs and the comment notes which tier was unavailable. One residual gap: if a committee model itself throws, that PR's review isn't posted (logged via `wrangler tail`) — bounded blast radius, visible in logs.
 
-**"Can it review private repos?"** — It's doing it right now. This repo is private.
+**"Can it review private repos?"** — Yes — this repo was private during the entire build and every PR was reviewed. The diff is fetched via the authenticated REST API with the App installation token.
 
 **"How would you scale it?"** — One Durable Object per PR serializes per-PR work by construction; the ingress is already global. The real ceilings are Workers AI throughput and osv.dev rate limits.
 
@@ -144,4 +161,4 @@ flowchart TD
 
 ---
 
-*Deployed 2026-10-01 · Bot: `cf-pr-review[bot]` · Worker: `cloudflare-code-reviewer.akshat-personal.workers.dev` — visit it for the rendered 7-pillar breakdown.*
+*Deployed 2026-10-01 during ClawBuilders S1:E5 — [Deploy AI Agents with Cloudflare](https://clawbuilder.club/events/s1/ep5/deploy-ai-agents-with-cloudflare) · Bot: `cf-pr-review[bot]` · Worker: `cloudflare-code-reviewer.akshat-personal.workers.dev` — visit it for the rendered 7-pillar breakdown.*
