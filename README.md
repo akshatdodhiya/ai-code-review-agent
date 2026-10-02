@@ -1,164 +1,144 @@
-# 🤖 cf-pr-review — an AI code reviewer living on the Cloudflare edge
+# Automated AI Code Review on Cloudflare Workers
 
-> **Live demo sandbox.** Every pull request opened in this repo is automatically reviewed — in under a minute — by a multi-model AI security pipeline running on Cloudflare Workers. There is no server: the whole thing is serverless, event-driven, and costs **$0**. This page is the guided tour.
+![Platform](https://img.shields.io/badge/Platform-Cloudflare_Workers-F38020?logo=cloudflare&logoColor=white)
+![Models](https://img.shields.io/badge/Models-Workers_AI-0051C3?logo=cloudflare&logoColor=white)
+![State](https://img.shields.io/badge/State-Durable_Objects-0051C3?logo=cloudflare&logoColor=white)
+![Integration](https://img.shields.io/badge/Integration-GitHub_App-24292E?logo=github&logoColor=white)
+![Cost](https://img.shields.io/badge/Runs_on-free_tier-brightgreen)
 
-**Stack** — Cloudflare Workers · Durable Objects (SQLite) · Workers AI (free tier) · GitHub App webhooks · osv.dev · deps.dev
+An automated pull-request review agent that runs entirely on Cloudflare's free tier. When a pull request is opened on a repository where the `cf-pr-review` GitHub App is installed, a webhook triggers a pipeline that scans the diff for leaked credentials, checks new dependencies against live vulnerability data, and — when the change warrants it — runs a multi-model AI review that is posted back to the PR as a structured report. There is no server to operate: the agent is a Cloudflare Worker backed by a Durable Object, and it costs nothing to keep running.
 
-**Base** — the [ClawBuilders cloudflare-code-reviewer](https://github.com/Clawbuilders/cloudflare-code-reviewer) reference architecture (inspired by Alibaba's open-code-review), deployed end-to-end from scratch, **with one deliberate modification**: the triage gate was moved off the paid `typesafe/jev` decision model onto the free first-party **Llama 3.3 70B**, so the entire pipeline runs on the free tier — no paid-model dependency anywhere.
+This repository is the sandbox in which the agent was developed and verified. The open pull requests referenced below are real reviews produced by the deployed system during development; they double as a record of how each pipeline path behaves.
 
-**Worker (visit it live)** — `https://cloudflare-code-reviewer.akshat-personal.workers.dev`
-**Bot identity** — `cf-pr-review[bot]`, a real GitHub App (ID 5156105) with least-privilege permissions
-**Built during** — ClawBuilders S1:E5: [Deploy AI Agents with Cloudflare](https://clawbuilder.club/events/s1/ep5/deploy-ai-agents-with-cloudflare)
+The project was built during ClawBuilders S1:E5, [Deploy AI Agents with Cloudflare](https://clawbuilder.club/events/s1/ep5/deploy-ai-agents-with-cloudflare), on top of the [ClawBuilders cloudflare-code-reviewer](https://github.com/Clawbuilders/cloudflare-code-reviewer) reference architecture, which takes its design cues from Alibaba's open-code-review. The changes I made to that architecture during deployment are listed under [Changes from the reference architecture](#changes-from-the-reference-architecture).
 
----
+## How a review happens
 
-## 🎬 The 30-second pitch
+1. GitHub delivers a signed webhook to a Cloudflare Worker, which verifies the HMAC-SHA256 signature and routes the event to a Durable Object scoped to that pull request.
+2. The Durable Object waits 15 seconds, so rapid consecutive pushes collapse into a single review instead of several.
+3. When the debounce alarm fires, the diff is fetched through the authenticated REST API and scanned for hardcoded credentials. A hit posts a critical block immediately and ends the pipeline.
+4. If the diff is clean, new `package.json` dependencies are queried against osv.dev for known CVEs, checked against OpenSSF Scorecard data via deps.dev, and evaluated against policy rules (CI workflow, auth, or infrastructure changes; oversized PRs).
+5. A decision model — Cloudflare's `@cf/cloudflare/clef` — judges whether the change needs a security review, a code-quality review, both, or neither. Low-signal changes get a short summary and skip the expensive models entirely. Real findings from the previous step always force a security review, so triage can add scrutiny but never remove it.
+6. If deep review is warranted, DeepSeek-R1 (security) and Qwen 2.5 Coder (quality) analyze in parallel — the security model receives full file contents, not just the diff, so it can judge whether a flaw is actually reachable.
+7. A Llama 3.3 70B arbiter merges everything: it deduplicates overlapping findings, verifies that proposed fixes introduce no new flaws, and formats the final report, which is posted as `cf-pr-review[bot]`. Every review is also written to a SQLite audit table inside the Durable Object.
 
-Someone opens a PR. GitHub fires a **signed webhook** into a **Cloudflare Worker** — no server, no VM, no cron, no polling. A **Durable Object** — a tiny stateful actor, one per PR — debounces pushes for 15 seconds. Then the diff runs through a **7-pillar security pipeline**: hardcoded-secret scanning, live CVE lookups, supply-chain scoring, policy gates. A **triage model** decides whether the expensive AI specialists are needed at all. If yes: a **DeepSeek-R1 security auditor** and a **Qwen 2.5 Coder quality reviewer** analyze in parallel, then a **Llama 3.3 70B arbiter** deduplicates, runs a regression checklist, and formats the verdict. The bot posts the review back on the PR, and every review is written to a SQLite audit trail inside the Durable Object.
+Observed end-to-end times during development: a secret-blocked PR completes in about 16 seconds; a full committee review posts in roughly 35–55 seconds; a triage-skipped PR in about 16 seconds.
 
-## 🗺️ Architecture
+## Architecture
 
 ```mermaid
 flowchart TD
-    PR["👤 Opens a pull request"] -->|"signed webhook (HMAC-SHA256)"| WH["⚡ Cloudflare Worker<br/>verify + route - free tier"]
-    WH --> DO["🗄️ Durable Object - one per PR<br/>15s push debounce · SQLite audit trail"]
-    DO --> AL["⏰ Alarm fires"]
-    AL --> P1{"Pillar 1<br/>secret scan"}
-    P1 -->|"secret found"| BLOCK["🚨 CRITICAL BLOCK comment<br/>pipeline stops - committee never runs"]
-    P1 -->|"clean"| DET["Pillar 2 · osv.dev CVEs - live<br/>Pillar 4 · policy / blast radius<br/>Pillar 7 · deps.dev OpenSSF - live"]
-    DET --> T{"Pillar 3.5 · Triage Gate<br/>Llama 3.3 70B - free tier"}
-    T -->|"no signal"| SKIP["📝 short skip comment<br/>expensive models never run"]
-    T -->|"needs review"| CTX["Pillar 5 · full-file context<br/>via GitHub API - reachability"]
-    CTX --> S["🔍 DeepSeek-R1 32B<br/>security specialist"]
-    CTX --> Q["✨ Qwen 2.5 Coder 32B<br/>quality specialist"]
-    S --> ARB["⚖️ Pillar 6 · Lead Arbiter<br/>Llama 3.3 70B<br/>dedupe · regression check · format"]
-    Q --> ARB
-    ARB --> POST["🤖 Review posted<br/>as cf-pr-review[bot]"]
+    subgraph S1["1 · Trigger"]
+        PR[Pull request opened or updated] -->|signed webhook| WH[Cloudflare Worker<br/>verifies the signature, routes by PR]
+        WH --> DO[Durable Object, one per PR<br/>waits 15 s to batch rapid pushes]
+    end
+
+    subgraph S2["2 · Deterministic checks - no AI involved"]
+        DO --> SEC{Hardcoded secrets<br/>in the diff?}
+        SEC -->|yes| BLK[Post critical block comment<br/>pipeline stops, committee never runs]
+        SEC -->|no| OSV[Query osv.dev for CVEs<br/>in new dependencies]
+        OSV --> POL[Policy and blast-radius rules<br/>plus OpenSSF scores from deps.dev]
+    end
+
+    subgraph S3["3 · Decision"]
+        POL --> TRI{Clef decision model<br/>does this diff need<br/>security or quality review?}
+        TRI -->|no| SKIP[Post a short summary<br/>expensive models are skipped]
+    end
+
+    subgraph S4["4 · AI review - only if needed"]
+        TRI -->|yes| CTX[Fetch full file contents<br/>for reachability context]
+        CTX --> DSR[DeepSeek-R1 32B<br/>security analysis]
+        CTX --> QWC[Qwen 2.5 Coder 32B<br/>code quality and suggested fixes]
+    end
+
+    subgraph S5["5 · Synthesis"]
+        DSR --> ARB[Llama 3.3 70B arbiter<br/>deduplicates, checks proposed fixes<br/>for regressions, formats the report]
+        QWC --> ARB
+    end
+
+    ARB --> OUT[Review posted to the PR<br/>by the cf-pr-review bot]
 ```
 
-## 🧩 The parts
+## Security pipeline
 
-| Part | What it is | Why it's there |
-|---|---|---|
-| GitHub App | `cf-pr-review`, posts as `cf-pr-review[bot]` | Bot identity with least-privilege scopes: Contents **read**, Pull requests **read/write** — nothing else |
-| Cloudflare Worker | Stateless ingress | Verifies every webhook's HMAC-SHA256 signature, filters to `pull_request` events, routes each PR to its own Durable Object |
-| Durable Object | `PrReviewCoordinator`, one per PR, SQLite-backed | 15-second push debounce (push 5 commits, get 1 review); runs the pipeline in an alarm handler; keeps the `reviews` audit table |
-| Workers AI | 4 models, all free tier | Division of labor — see below |
-| osv.dev + deps.dev | Live public APIs | Real CVE data + OpenSSF supply-chain scores — no keys, no binaries |
-
-**The auth chain** (a good demo beat): the App's PKCS#8 private key → signed JWT → exchanged for a 1-hour installation token → used to fetch diffs and post comments. Web Crypto only, zero auth libraries.
-
-## 🛡️ The 7-pillar security suite
-
-| # | Pillar | Kind | What it does |
+| # | Check | Kind | Behavior |
 |---|---|---|---|
-| 1 | Secret scan (gitleaks-pattern) | heuristic | 13 regexes: AWS/GitHub/OpenAI/Stripe/Slack/npm keys, private key blocks. **Hit = instant block, pipeline stops** |
-| 2 | osv.dev vulnerability lookup | **REAL** | New `package.json` deps batch-queried live — real CVE/GHSA IDs |
-| 3 | Hard-rails file filter | heuristic | Lockfiles, YAML, markdown, dist/vendor never reach the models — token savings |
-| 3.5 | Triage gate | free tier | Llama 3.3 70B decides: security? quality? both? neither? Docs-only PRs skip the committee entirely |
-| 4 | Policy / blast-radius gate | heuristic | Flags `.github/workflows/`, `auth/`, `wrangler.json` changes; >15 files = split-your-PR warning |
-| 5 | Reachability context | **REAL** | Pulls **full file contents** (not just the hunk) via the GitHub API so the security model judges *reachability*, not just patterns |
-| 6 | Regression check (OWASP-ASRH-style) | heuristic | The arbiter is instructed to verify proposed fixes introduce zero secondary vulnerabilities |
-| 7 | OpenSSF Scorecard | **REAL** | New deps scored via deps.dev — maintenance, review practices, branch protection |
+| 1 | Secret scan | heuristic | Regex ruleset modeled on gitleaks (AWS, GitHub, OpenAI, Stripe, Slack, npm, and other token shapes). Any hit blocks the PR immediately |
+| 2 | osv.dev lookup | live API | New `package.json` dependencies are batch-queried for known CVEs — real advisory IDs, not guesses |
+| 3 | File filter | heuristic | Lockfiles, YAML, markdown, and vendored/build paths never reach the models |
+| 3.5 | Triage gate | decision model | `@cf/cloudflare/clef` decides which specialists run, with calibrated confidence values |
+| 4 | Policy gate | heuristic | Flags CI workflow, auth, and infrastructure config changes; warns on oversized PRs |
+| 5 | Reachability context | live API | Full file contents are fetched from the GitHub API so the security model can judge reachability, not just patterns |
+| 6 | Regression check | model instruction | The arbiter is required to verify that proposed fixes introduce no secondary vulnerabilities |
+| 7 | OpenSSF Scorecard | live API | New dependencies are scored via deps.dev (maintenance, review practices, branch protection) |
 
-**The honesty layer:** Workers are V8 isolates — they cannot execute native binaries (no real gitleaks/semgrep/opa). Pillars marked **REAL** call live public HTTP APIs; heuristic ones are honest JS re-implementations of the named tool's *idea*. The worker's landing page renders this same breakdown with badges.
+One honesty note worth stating plainly: Cloudflare Workers are V8 isolates and cannot execute native binaries, so this pipeline does not run the real gitleaks, semgrep, or OPA. The rows marked heuristic are deliberate re-implementations of those tools' rule sets in JavaScript; the rows marked live API call real public services. The worker's landing page renders the same breakdown.
 
-## 🤖 The AI committee — division of labor
+## Model committee
 
-| Model | Role | Why this model |
-|---|---|---|
-| Llama 3.3 70B | Triage gate | Cheap classifier in front of expensive models — the cost cascade |
-| DeepSeek-R1 Distill 32B | Security specialist | Reasoning model doing Mantis-style *reachability* analysis |
-| Qwen 2.5 Coder 32B | Quality specialist | Code-specialized; emits suggestion blocks |
-| Llama 3.3 70B | Lead arbiter | Dedupes, kills false alarms, enforces the regression checklist, formats |
-
-## ⏱️ What happens when you open a PR (measured in this repo)
-
-| t | Event |
+| Model | Role |
 |---|---|
-| ~0s | Signed webhook hits the Worker; HMAC verified; routed to the per-PR Durable Object |
-| 0–15s | Debounce window — keep pushing and the alarm keeps resetting |
-| 15s | Alarm fires: fetch diff → Pillar 1 secret scan |
-| 15s+ε | **If a secret is found: 🚨 critical block comment posted, done** (~16s end-to-end) |
-| ~15–25s | osv.dev CVEs · policy gate · deps.dev scorecard · triage decision |
-| ~25–50s | Committee: DeepSeek-R1 ∥ Qwen (only the ones triage approved), then the arbiter |
-| ~35–55s | Review posted by `cf-pr-review[bot]` + row inserted in the SQLite audit table |
+| `@cf/cloudflare/clef` (27B decision model, Apache 2.0) | Triage gate: reads the diff state and returns calibrated probabilities for security/quality review and change category |
+| `@cf/deepseek-ai/deepseek-r1-distill-qwen-32b` | Security specialist: reachability-oriented analysis with full-file context |
+| `@cf/qwen/qwen2.5-coder-32b-instruct` | Quality specialist: correctness and style findings with suggested fixes |
+| `@cf/meta/llama-3.3-70b-instruct-fp8-fast` | Lead arbiter: deduplication, regression checklist, final formatting |
 
-## 🧪 Live artifacts — the three code paths (all real, all in this repo)
+All four are first-party Workers AI models billed in Neurons, so every call draws on the free daily allocation. The triage gate is what makes the economics work: in the verification run, Clef classified a notes-only change as documentation with a security confidence of 0.02 and a quality confidence of 0.09, and the committee never ran. A triage-only review costs on the order of a hundred Neurons; a full committee review consumes roughly 800–1,000.
 
-| PR | Contents | Path taken | What the bot did | Time |
-|---|---|---|---|---|
-| [#1](https://github.com/akshatdodhiya/code-reviewer-test/pull/1) | Fake AWS key + fake GitHub PAT (publicly documented example strings) | 🛑 Pillar 1 emergency brake | 🚨 `CRITICAL SECURITY BLOCK` — named the exact credential types ("GitHub Token, AWS Access Key ID"), told the author to revoke and purge git history. The AI committee never ran — the deterministic gate didn't need it. | **16s** |
-| [#2](https://github.com/akshatdodhiya/code-reviewer-test/pull/2) | `lodash@4.17.15` + `request@2.88.0`, no secrets | Full committee (forced by real CVEs) | osv.dev found real advisories → **forced** the security specialist on → committee posted the synthesis. This run also caught a **visible degradation**: the paid triage model was unavailable, the posted comment *said so*, and the free-tier fallback kept the pipeline alive — proof that degraded runs are never silent. | **36s** |
-| [#3](https://github.com/akshatdodhiya/code-reviewer-test/pull/3) | Vulnerable deps + a utilities file with real bugs | Full committee, post-swap — **$0 all the way down** | Complete review with every badge section — [SECURITY] (NPE in `formatUser`, unsafe fetch, retry without backoff), [POLICY] (`var` usage), [DEPENDENCY] (6 lodash advisories, 1 request), [SUPPLY-CHAIN] (low OpenSSF checks), [CODE QUALITY] (`for...in` without `hasOwnProperty`) — plus a numbered fixes list and corrected example code. | **53s** |
+## Free-tier operation
 
-*(Every credential value in #1 is a publicly documented example string with zero validity.)*
+| Component | Plan |
+|---|---|
+| Cloudflare Worker (webhook ingress) | Free tier, 100k requests/day |
+| Durable Object (SQLite-backed) | Free tier |
+| Workers AI (all model calls) | 10,000 free Neurons/day, resets 00:00 UTC |
+| GitHub App and webhooks | Free |
+| osv.dev and deps.dev | Public APIs, no keys |
 
-## 🧪 Try it yourself
+At roughly 800–1,000 Neurons per full committee review, the daily allocation covers about ten deep reviews plus hundreds of triage-only ones. If the allocation is exhausted, model calls fail with a 429 and reset at 00:00 UTC; the pipeline's response to that failure is described below.
 
-This repo is the bot's live playground — open any pull request and a review lands in under a minute:
+## Example reviews
 
-- Add a file containing a **fake** API key (use publicly documented example strings only — never real credentials) → Pillar 1 blocks it instantly
-- Add a `package.json` dependency with known CVEs → live osv.dev findings force a security review
-- Open a docs-only PR → the triage gate skips the expensive committee and says so in a short comment
+The pull requests in this repository were opened deliberately to exercise specific paths:
 
-Fair-play notes for visitors: reviews run on Workers AI's free daily Neuron allowance — if today's budget is spent, the bot goes quiet until 00:00 UTC. Please keep test PRs reasonable so everyone gets a turn.
+| PR | Change | Pipeline path | Result |
+|---|---|---|---|
+| [#1](https://github.com/akshatdodhiya/code-reviewer-test/pull/1) | Test fixtures containing inert, publicly documented example credentials | Secret gate | Critical block naming the credential types; the committee was never invoked (~16 s) |
+| [#2](https://github.com/akshatdodhiya/code-reviewer-test/pull/2) | Known-vulnerable dependency pins, no secrets | Full committee, forced by live CVE findings | Synthesized review posted. This run predates the Clef migration, so the comment carries the visible fallback notice produced when the original architecture's paid triage model was unavailable (~36 s) |
+| [#3](https://github.com/akshatdodhiya/code-reviewer-test/pull/3) | Vulnerable dependencies plus utility code with real defects | Full committee | Complete review with security, policy, dependency, supply-chain, and quality findings, plus a numbered fix list and corrected example code (~53 s) |
+| [#4](https://github.com/akshatdodhiya/code-reviewer-test/pull/4) | Notes-only file | Triage gate | Classified as documentation (security confidence 0.02, quality confidence 0.09); specialists skipped (~16 s) |
 
-## 🧷 About the code in the test branches
+The credential strings in PR #1 are published example values and were never valid.
 
-The branches in this repo contain **deliberate test fixtures**: fake credentials (publicly documented example strings with zero validity — see PR #1) and known-vulnerable dependency pins (see PR #2 / #3). They exist to trip specific pipeline pillars so every review path could be verified end-to-end. None of it is production code, nothing executes, and the "secrets" are inert examples.
+## Changes from the reference architecture
 
-## 🎤 Talking points
+This project is a deployment of an existing open architecture, with the following work of my own on top of it:
 
-- **It's event-driven serverless.** Nothing runs until a PR happens. No idle servers, no cron polling GitHub, no queue infrastructure.
-- **The debounce is a Durable Object.** Push five commits in ten seconds, get one review — the alarm resets per push. One DO per PR also serializes reviews naturally, no locks needed.
-- **Deterministic before probabilistic.** The regex/CVE/policy gates run *before* any model call — a hardcoded AWS key never depends on an LLM noticing it.
-- **Triage can only add scrutiny, never remove it.** If osv.dev or the policy gate found something real, the security specialist runs no matter what the triage model says.
-- **Degradation is visible, never silent.** If a tier fails, the pipeline fails *open* (runs the full committee) and the posted comment says exactly which tier was unavailable.
-- **Private repos are handled fine** — this repo *was* private for the entire build, and the bot reviewed every PR. The diff is fetched via the authenticated REST API with the App installation token (the `.diff` web route 404s for App tokens on private repos — a real deployment gotcha that was debugged and fixed here).
+- **End-to-end deployment.** Worker and Durable Object deployment, GitHub App registration with least-privilege permissions (Contents: read; Pull requests: read/write), PKCS#8 private-key conversion, secret management via Wrangler, webhook signature validation, and App installation — verified by exercising every pipeline path with targeted pull requests rather than trusting that a deployment succeeded.
+- **Removal of the only paid dependency.** The reference design routes triage through `typesafe/jev`, a third-party decision model billed via AI Gateway credits with no free tier. I replaced it with `@cf/cloudflare/clef` — Cloudflare's first-party, Apache-2.0-licensed decision model, released the same day this project was built — while keeping a text-model fallback and a fail-open tier beneath it, so a triage-layer failure can never silently drop a review. Every model call in the pipeline now runs inside the free Neurons allocation.
+- **Fix for truncated reviews.** The arbiter inherited the platform's 256-token default output cap, which cut reviews off mid-sentence. Raising the cap to 2048 tokens produces complete reports.
+- **Private-repository verification.** Diffs are fetched through the authenticated REST API with the App installation token, because GitHub's `.diff` web route rejects App tokens on private repositories. The sandbox repository here was private throughout development, so every review was produced under exactly those conditions.
 
-## 💸 What it costs
+## Design notes
 
-| Component | Plan | Cost |
-|---|---|---|
-| Cloudflare Worker | Free tier — 100k req/day | $0 |
-| Durable Object (SQLite) | Free tier | $0 |
-| Workers AI — all 4 models | Free Neurons allowance | $0 |
-| GitHub App + webhooks | Free | $0 |
-| osv.dev + deps.dev APIs | Public | $0 |
-| **Total** | | **$0** |
+- Deterministic checks run before any model call. A leaked credential never depends on a language model noticing it.
+- Triage can only add scrutiny. Real findings from osv.dev or the policy gate force a security review regardless of what the decision model says.
+- Degradation is visible by design. If a tier fails, the pipeline fails open — it runs the full committee rather than skipping — and the posted review states which tier was unavailable.
+- One Durable Object per pull request gives natural per-PR serialization, and the 15-second alarm debounce means many pushes produce one review.
+- Model inputs are bounded (diff slice length, file count, context size) to keep latency and Neuron spend predictable regardless of PR size.
 
-## 🏗️ How it was built (the honest build order)
+## Limitations
 
-1. **Deploy the Worker first** — the GitHub App's webhook needs a live URL to point at
-2. **Register the GitHub App** — least-privilege permissions, and subscribe to the `pull_request` event (the checkbox that silently kills most setups — GitHub delivers *nothing* without it)
-3. **Convert the private key** PKCS#1 → PKCS#8 (`openssl pkcs8 -topk8 -nocrypt`) because Cloudflare's Web Crypto only accepts PKCS#8
-4. **Set the secrets** (`GITHUB_APP_PRIVATE_KEY`, `GITHUB_WEBHOOK_SECRET`) via wrangler, piped from file
-5. **Install** the App on this sandbox repo only
-6. **Weaponized test PRs** — each engineered to trip a specific pillar, verified live with `wrangler tail`
-7. **Modify:** triage moved from paid `typesafe/jev` to free Llama 3.3 70B (fail-open safety kept), and the arbiter's output cap raised to 2048 tokens so reviews post complete
+- The secret scan is pattern-based, not entropy-based; it catches well-shaped secrets, not all secrets.
+- Dependency analysis parses `package.json` only (no lockfiles) and caps at ten packages per run; full-file context is capped at two files of 4,000 characters.
+- osv.dev findings are provided to the arbiter rather than to the security specialist, so dependency advisories and code-level analysis are synthesized rather than cross-examined.
+- If a specialist model call itself throws, that review is not posted; the failure is logged via `wrangler tail` and is the one bounded gap in the fail-open chain.
+- Everything runs on free tiers. Sustained volume beyond roughly ten committee reviews per day exhausts the daily Neuron allocation until it resets at 00:00 UTC.
 
-## ❓ Q&A prep
+## Credits
 
-**"Why regex and not the real gitleaks binary?"** — Workers are V8 isolates; they can't exec native binaries. The pipeline is honest about it: real public APIs where they exist, labeled pattern rules where they don't.
+Built during ClawBuilders S1:E5 — [Deploy AI Agents with Cloudflare](https://clawbuilder.club/events/s1/ep5/deploy-ai-agents-with-cloudflare).
 
-**"What if the AI is wrong?"** — The security-critical gates (secret scan, CVE lookup) are deterministic and don't depend on models. Models add reasoning on top; they can't subtract a finding.
+Based on the [ClawBuilders cloudflare-code-reviewer](https://github.com/Clawbuilders/cloudflare-code-reviewer) reference architecture, which credits Alibaba's open-code-review as its design inspiration. The deployment changes listed above are my own.
 
-**"What if a model call fails?"** — Triage fails *open* — the full committee runs and the comment notes which tier was unavailable. One residual gap: if a committee model itself throws, that PR's review isn't posted (logged via `wrangler tail`) — bounded blast radius, visible in logs.
-
-**"Can it review private repos?"** — Yes — this repo was private during the entire build and every PR was reviewed. The diff is fetched via the authenticated REST API with the App installation token.
-
-**"How would you scale it?"** — One Durable Object per PR serializes per-PR work by construction; the ingress is already global. The real ceilings are Workers AI throughput and osv.dev rate limits.
-
-**"Why not just use GitHub Copilot code review?"** — This is an *open, inspectable* pipeline: deterministic gates plus a model committee you can re-route or replace. We replaced one model mid-build (paid → free) with a ~40-line diff — try doing that with a black box.
-
-## ⚠️ Caveats (know them before someone else finds them)
-
-- The secret scan is pattern-based, not entropy-based — it catches well-*shaped* secrets, not all secrets.
-- Pillar 2 parses `package.json` only (no lockfiles), caps at 10 deps; Pillar 5 fetches max 2 files × 4k chars — deliberate demo-scope bounds.
-- osv.dev findings go to the arbiter's synthesis prompt, not into the security specialist's prompt — the specialist reasons about code; the arbiter layers dependency findings on top.
-- Everything runs on free tiers; sustained heavy PR volume could hit the daily Workers AI Neuron allowance (resets 00:00 UTC).
-
----
-
-*Deployed 2026-10-01 during ClawBuilders S1:E5 — [Deploy AI Agents with Cloudflare](https://clawbuilder.club/events/s1/ep5/deploy-ai-agents-with-cloudflare) · Bot: `cf-pr-review[bot]` · Worker: `cloudflare-code-reviewer.akshat-personal.workers.dev` — visit it for the rendered 7-pillar breakdown.*
+Agent: `cf-pr-review[bot]` (GitHub App ID 5156105) · Worker: `cloudflare-code-reviewer.akshat-personal.workers.dev`
