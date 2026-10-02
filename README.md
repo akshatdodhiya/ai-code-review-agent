@@ -103,4 +103,4 @@ The credential strings in PR #1 are published example values and were never vali
 
 Based on the [ClawBuilders cloudflare-code-reviewer](https://github.com/Clawbuilders/cloudflare-code-reviewer) reference architecture, which credits Alibaba's open-code-review as its design inspiration. The deployment changes above are my own.
 
-Agent: `cf-pr-review[bot]` (App ID 5156105) · Worker: `cloudflare-code-reviewer.akshat-personal.workers.dev`
+Agent: `cf-pr-review[bot]` (App ID 5156105) · Worker: `cloudflare-code-reviewer.akshat-codes.workers.dev`
